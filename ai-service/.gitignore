@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environment
+venv/
+.env
+
+# YOLO models
+*.pt
+
+# Videos
+*.mp4
+*.avi
+
+# OS / Editor
+.DS_Store
+.vscode/
+
+venv
+public
