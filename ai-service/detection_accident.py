@@ -1,3 +1,4 @@
+from __future__ import annotations
 import math
 import logging
 import itertools
@@ -10,8 +11,69 @@ import json
 import cv2
 import numpy as np
 from collections import deque
+import subprocess
+import os
 
 from ultralytics import YOLO
+
+
+def extract_accident_clip(
+    video_path: str, output_dir: str, start_time: float, duration: float, clip_name: str
+):
+    os.makedirs(output_dir, exist_ok=True)
+
+    output_path = os.path.join(output_dir, f"{clip_name}.mp4")
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-ss",
+        f"{start_time:.3f}",
+        "-i",
+        video_path,
+        "-t",
+        f"{duration:.3f}",
+        "-c",
+        "copy",
+        "-avoid_negative_ts",
+        "1",
+        output_path,
+    ]
+
+    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    return output_path
+
+
+def generate_accident_clips(
+    video_path: str,
+    accidents: List["AccidentEvent"],
+    clip_duration_post: float = 5.0,
+    clip_duration_pre: float = 1.0,
+):
+    clip_paths = []
+
+    for idx, accident in enumerate(accidents, 1):
+        start_time = max(0.0, accident.video_timestamp - clip_duration_pre)
+        duration = clip_duration_pre + clip_duration_post
+
+        clip_name = (
+            f"accident_{idx}_"
+            f"t{accident.video_timestamp:.2f}_"
+            f"v{accident.vehicle_ids[0]}_{accident.vehicle_ids[1]}"
+        )
+
+        clip_path = extract_accident_clip(
+            video_path=video_path,
+            output_dir="accident_clips",
+            start_time=start_time,
+            duration=duration,
+            clip_name=clip_name,
+        )
+
+        clip_paths.append(clip_path)
+
+    return clip_paths
 
 
 # ============================================================================
@@ -21,6 +83,7 @@ from ultralytics import YOLO
 
 class DetectionStrategy(Enum):
     """Detection strategies for different accident scenarios"""
+
     SUDDEN_STOP = "sudden_stop"  # Rapid deceleration
     COLLISION_OVERLAP = "collision_overlap"  # Physical overlap
     TRAJECTORY_CHANGE = "trajectory_change"  # Sudden direction change
@@ -32,48 +95,50 @@ class DetectionConfig:
     """Configuration parameters for accident detection"""
 
     # Strategy weights (must sum to 1.0)
-    STRATEGY_WEIGHTS: Dict[str, float] = field(default_factory=lambda: {
-        "speed_drop": 0.35,
-        "iou_overlap": 0.30,
-        "trajectory": 0.20,
-        "temporal": 0.15
-    })
+    STRATEGY_WEIGHTS: Dict[str, float] = field(
+        default_factory=lambda: {
+            "speed_drop": 0.35,
+            "iou_overlap": 0.30,
+            "trajectory": 0.20,
+            "temporal": 0.15,
+        }
+    )
 
     # Speed thresholds (adaptive based on vehicle history)
     SPEED_DROP_THRESHOLD_MIN: float = 3.0  # pixels/frame
     SPEED_DROP_THRESHOLD_MAX: float = 15.0
     SPEED_DROP_PERCENTAGE: float = 0.5  # 50% speed drop
     STOP_SPEED_THRESHOLD: float = 3.0
-    
+
     # Collision thresholds
     IOU_THRESHOLD_MIN: float = 0.10
     IOU_THRESHOLD_COLLISION: float = 0.20  # Clear collision
     IOU_RAPID_INCREASE: float = 0.05  # Rapid approach
-    
+
     # Temporal confirmation
     REQUIRED_FRAMES_MIN: int = 2
     REQUIRED_FRAMES_MAX: int = 5
     ACCIDENT_WINDOW_FRAMES: int = 10  # Look back window
-    
+
     # Trajectory analysis
     DIRECTION_CHANGE_THRESHOLD: float = 45.0  # degrees
     TRAJECTORY_SMOOTHING: int = 5  # frames
-    
+
     # Speed conversion
     PIXEL_TO_METER: float = 0.045
     FPS_TARGET: float = 30.0
-    
+
     # Model settings
     MODEL_PATH: str = "yolov8n.pt"
     TRACKER_CONFIG: str = "bytetrack.yaml"
     CONFIDENCE_THRESHOLD: float = 0.45
-    
+
     # Output settings
     LOG_FILE: str = "accident_detection.log"
     ACCIDENT_LOG: str = "accidents.json"
     ACCIDENT_REPORT: str = "accident_report.txt"
     DEBUG_OUTPUT: str = "debug_frames.json"
-    
+
     # Detection settings
     COOLDOWN_SECONDS: float = 8.0
     MIN_DETECTION_CONFIDENCE: float = 0.60
@@ -98,8 +163,7 @@ def setup_logging(log_file: str = "accident_detection.log") -> logging.Logger:
     ch.setLevel(logging.INFO)
 
     formatter = logging.Formatter(
-        "%(asctime)s - %(levelname)s - %(message)s",
-        datefmt="%H:%M:%S"
+        "%(asctime)s - %(levelname)s - %(message)s", datefmt="%H:%M:%S"
     )
     fh.setFormatter(formatter)
     ch.setFormatter(formatter)
@@ -118,6 +182,7 @@ def setup_logging(log_file: str = "accident_detection.log") -> logging.Logger:
 @dataclass
 class VideoMetadata:
     """Video file metadata"""
+
     filepath: str
     fps: float
     total_frames: int
@@ -187,6 +252,7 @@ class VideoMetadataExtractor:
 @dataclass
 class VehicleState:
     """Enhanced vehicle state with trajectory history"""
+
     track_id: int
     frame_idx: int
     timestamp: float
@@ -196,12 +262,12 @@ class VehicleState:
     speed: float
     prev_speed: float
     direction: float  # angle in degrees
-    
+
     # History for analysis
     position_history: deque = field(default_factory=lambda: deque(maxlen=20))
     speed_history: deque = field(default_factory=lambda: deque(maxlen=20))
     iou_history: Dict[int, deque] = field(default_factory=dict)
-    
+
     def __post_init__(self):
         self.bbox_width = self.bbox[2] - self.bbox[0]
         self.bbox_height = self.bbox[3] - self.bbox[1]
@@ -211,31 +277,33 @@ class VehicleState:
 @dataclass
 class AccidentEvent:
     """Comprehensive accident record"""
+
     # Timing
     detection_time: datetime
     frame_number: int
     video_timestamp: float
     timecode: str
-    
+
     # Vehicles
     vehicle_ids: List[int]
     primary_vehicle: int
     speeds_kmh: List[float]
     speed_drops_kmh: List[float]
-    
+
     # Collision metrics
     iou: float
     max_iou: float
     iou_growth_rate: float
     collision_location: Tuple[float, float]
     collision_severity: str
-    
+
     # Detection details
     detection_strategy: str
     confidence_score: float
     contributing_factors: List[str]
     frame_sequence: List[int]
-    
+    clip_path: Optional[str] = None
+
     def to_dict(self) -> dict:
         return {
             "detection_time": self.detection_time.isoformat(),
@@ -252,14 +320,15 @@ class AccidentEvent:
                 "iou_growth_rate": round(self.iou_growth_rate, 4),
                 "location": {
                     "x": round(self.collision_location[0], 2),
-                    "y": round(self.collision_location[1], 2)
-                }
+                    "y": round(self.collision_location[1], 2),
+                },
             },
             "severity": self.collision_severity,
             "detection_strategy": self.detection_strategy,
             "confidence": round(self.confidence_score, 3),
             "contributing_factors": self.contributing_factors,
-            "frame_sequence": self.frame_sequence
+            "frame_sequence": self.frame_sequence,
+            "clip_path": self.clip_path,
         }
 
     def to_readable_string(self) -> str:
@@ -313,7 +382,9 @@ class AdvancedSpeedCalculator:
         self.metadata = video_metadata
         self.pixel_to_meter = pixel_to_meter
 
-    def calculate(self, track_id: int, bbox: List[float], frame_idx: int) -> VehicleState:
+    def calculate(
+        self, track_id: int, bbox: List[float], frame_idx: int
+    ) -> VehicleState:
         """Calculate comprehensive vehicle state"""
         x1, y1, x2, y2 = bbox
         cx = (x1 + x2) / 2.0
@@ -322,16 +393,20 @@ class AdvancedSpeedCalculator:
 
         if track_id in self.vehicle_history:
             prev_state = self.vehicle_history[track_id]
-            
+
             # Calculate speed
             dx = cx - prev_state.cx
             dy = cy - prev_state.cy
             distance = math.sqrt(dx**2 + dy**2)
             speed = distance
             prev_speed = prev_state.speed
-            
+
             # Calculate direction (angle)
-            direction = math.degrees(math.atan2(dy, dx)) if distance > 0.5 else prev_state.direction
+            direction = (
+                math.degrees(math.atan2(dy, dx))
+                if distance > 0.5
+                else prev_state.direction
+            )
         else:
             speed = 0.0
             prev_speed = 0.0
@@ -347,13 +422,13 @@ class AdvancedSpeedCalculator:
             cy=cy,
             speed=speed,
             prev_speed=prev_speed,
-            direction=direction
+            direction=direction,
         )
 
         # Update history
         state.position_history.append((cx, cy))
         state.speed_history.append(speed)
-        
+
         # Preserve IoU history from previous state
         if track_id in self.vehicle_history:
             state.iou_history = self.vehicle_history[track_id].iou_history
@@ -381,39 +456,40 @@ class AdvancedSpeedCalculator:
         """Calculate direction change over last N frames"""
         if track_id not in self.vehicle_history:
             return 0.0
-        
+
         state = self.vehicle_history[track_id]
         if len(state.position_history) < frames:
             return 0.0
-        
+
         positions = list(state.position_history)[-frames:]
         if len(positions) < 2:
             return 0.0
-        
+
         # Calculate angle change
         dx1 = positions[1][0] - positions[0][0]
         dy1 = positions[1][1] - positions[0][1]
         dx2 = positions[-1][0] - positions[-2][0]
         dy2 = positions[-1][1] - positions[-2][1]
-        
+
         if abs(dx1) < 0.1 and abs(dy1) < 0.1:
             return 0.0
         if abs(dx2) < 0.1 and abs(dy2) < 0.1:
             return 0.0
-        
+
         angle1 = math.degrees(math.atan2(dy1, dx1))
         angle2 = math.degrees(math.atan2(dy2, dx2))
-        
+
         diff = abs(angle2 - angle1)
         if diff > 180:
             diff = 360 - diff
-        
+
         return diff
 
     def clear_old_tracks(self, current_frame: int, max_age: int = 300):
         """Remove stale tracks"""
         to_remove = [
-            tid for tid, state in self.vehicle_history.items()
+            tid
+            for tid, state in self.vehicle_history.items()
             if current_frame - state.frame_idx > max_age
         ]
         for tid in to_remove:
@@ -446,24 +522,25 @@ class AdvancedCollisionDetector:
     @staticmethod
     def calculate_distance(state1: VehicleState, state2: VehicleState) -> float:
         """Calculate center distance between vehicles"""
-        return math.sqrt((state1.cx - state2.cx)**2 + (state1.cy - state2.cy)**2)
+        return math.sqrt((state1.cx - state2.cx) ** 2 + (state1.cy - state2.cy) ** 2)
 
     @staticmethod
-    def calculate_approach_rate(state1: VehicleState, state2: VehicleState, 
-                                vehicle_id1: int, vehicle_id2: int) -> float:
+    def calculate_approach_rate(
+        state1: VehicleState, state2: VehicleState, vehicle_id1: int, vehicle_id2: int
+    ) -> float:
         """Calculate rate of approach (IoU growth)"""
         # Get IoU history
         if vehicle_id2 not in state1.iou_history:
             return 0.0
-        
+
         iou_hist = state1.iou_history[vehicle_id2]
         if len(iou_hist) < 2:
             return 0.0
-        
+
         recent = list(iou_hist)[-5:]
         if len(recent) < 2:
             return 0.0
-        
+
         # Calculate growth rate
         return (recent[-1] - recent[0]) / len(recent)
 
@@ -476,14 +553,19 @@ class AdvancedCollisionDetector:
 class MultiStrategyAccidentDetector:
     """Advanced accident detection with multiple strategies"""
 
-    def __init__(self, config: DetectionConfig, logger: logging.Logger,
-                 video_metadata: VideoMetadata, speed_calc: AdvancedSpeedCalculator):
+    def __init__(
+        self,
+        config: DetectionConfig,
+        logger: logging.Logger,
+        video_metadata: VideoMetadata,
+        speed_calc: AdvancedSpeedCalculator,
+    ):
         self.config = config
         self.logger = logger
         self.metadata = video_metadata
         self.speed_calc = speed_calc
         self.collision_det = AdvancedCollisionDetector()
-        
+
         # Detection state
         self.detected_accidents: List[AccidentEvent] = []
         self.accident_candidates: Dict[Tuple[int, int], Dict] = {}
@@ -491,83 +573,106 @@ class MultiStrategyAccidentDetector:
         self.accident_pair_count: Dict[Tuple[int, int], int] = {}
         self.debug_data: List[Dict] = []
 
-    def analyze_pair(self, state1: VehicleState, state2: VehicleState, 
-                     iou: float, frame_idx: int) -> Optional[AccidentEvent]:
+    def analyze_pair(
+        self, state1: VehicleState, state2: VehicleState, iou: float, frame_idx: int
+    ) -> Optional[AccidentEvent]:
         """Analyze vehicle pair for accident indicators"""
-        
+
         # Update IoU history
         pair_key = tuple(sorted([state1.track_id, state2.track_id]))
-        
+
         if state2.track_id not in state1.iou_history:
             state1.iou_history[state2.track_id] = deque(maxlen=20)
         if state1.track_id not in state2.iou_history:
             state2.iou_history[state1.track_id] = deque(maxlen=20)
-        
+
         state1.iou_history[state2.track_id].append(iou)
         state2.iou_history[state1.track_id].append(iou)
-        
+
         # Check cooldown
         current_time = self.metadata.frame_to_timestamp(frame_idx)
         for vid in pair_key:
             if vid in self.last_accident_time:
-                if current_time - self.last_accident_time[vid] < self.config.COOLDOWN_SECONDS:
+                if (
+                    current_time - self.last_accident_time[vid]
+                    < self.config.COOLDOWN_SECONDS
+                ):
                     return None
-        
+
         # Check max accidents per pair
-        if self.accident_pair_count.get(pair_key, 0) >= self.config.MAX_ACCIDENTS_PER_PAIR:
+        if (
+            self.accident_pair_count.get(pair_key, 0)
+            >= self.config.MAX_ACCIDENTS_PER_PAIR
+        ):
             return None
-        
+
         # Calculate metrics
         metrics = self._calculate_metrics(state1, state2, iou, frame_idx)
-        
+
         # Multi-strategy detection
-        detection_result = self._multi_strategy_detection(state1, state2, metrics, frame_idx)
-        
+        detection_result = self._multi_strategy_detection(
+            state1, state2, metrics, frame_idx
+        )
+
         if detection_result:
             strategy, confidence, factors = detection_result
-            
+
             if confidence >= self.config.MIN_DETECTION_CONFIDENCE:
                 event = self._create_accident_event(
-                    state1, state2, iou, metrics, frame_idx,
-                    strategy, confidence, factors
+                    state1,
+                    state2,
+                    iou,
+                    metrics,
+                    frame_idx,
+                    strategy,
+                    confidence,
+                    factors,
                 )
-                
+
                 # Update tracking
                 for vid in pair_key:
                     self.last_accident_time[vid] = current_time
-                self.accident_pair_count[pair_key] = self.accident_pair_count.get(pair_key, 0) + 1
-                
+                self.accident_pair_count[pair_key] = (
+                    self.accident_pair_count.get(pair_key, 0) + 1
+                )
+
                 return event
-        
+
         return None
 
-    def _calculate_metrics(self, state1: VehicleState, state2: VehicleState,
-                          iou: float, frame_idx: int) -> Dict:
+    def _calculate_metrics(
+        self, state1: VehicleState, state2: VehicleState, iou: float, frame_idx: int
+    ) -> Dict:
         """Calculate comprehensive metrics"""
-        
+
         # Speed metrics
         speed_drop1 = state1.prev_speed - state1.speed
         speed_drop2 = state2.prev_speed - state2.speed
-        speed_drop_pct1 = (speed_drop1 / state1.prev_speed * 100) if state1.prev_speed > 1 else 0
-        speed_drop_pct2 = (speed_drop2 / state2.prev_speed * 100) if state2.prev_speed > 1 else 0
-        
+        speed_drop_pct1 = (
+            (speed_drop1 / state1.prev_speed * 100) if state1.prev_speed > 1 else 0
+        )
+        speed_drop_pct2 = (
+            (speed_drop2 / state2.prev_speed * 100) if state2.prev_speed > 1 else 0
+        )
+
         # Average speeds
         avg_speed1 = self.speed_calc.get_average_speed(state1.track_id, 5)
         avg_speed2 = self.speed_calc.get_average_speed(state2.track_id, 5)
-        
+
         # IoU metrics
         iou_hist1 = state1.iou_history.get(state2.track_id, deque())
         max_iou = max(iou_hist1) if iou_hist1 else iou
-        iou_growth = self.collision_det.calculate_approach_rate(state1, state2, 
-                                                                 state1.track_id, state2.track_id)
-        
+        iou_growth = self.collision_det.calculate_approach_rate(
+            state1, state2, state1.track_id, state2.track_id
+        )
+
         # Trajectory metrics
         dir_change1 = self.speed_calc.get_direction_change(state1.track_id)
         dir_change2 = self.speed_calc.get_direction_change(state2.track_id)
-        
+
         # Distance
         distance = self.collision_det.calculate_distance(state1, state2)
-        
+
         return {
             "speed_drop1": speed_drop1,
             "speed_drop2": speed_drop2,
@@ -585,108 +690,145 @@ class MultiStrategyAccidentDetector:
             "distance": distance,
         }
 
-    def _multi_strategy_detection(self, state1: VehicleState, state2: VehicleState,
-                                  metrics: Dict, frame_idx: int) -> Optional[Tuple[str, float, List[str]]]:
+    def _multi_strategy_detection(
+        self, state1: VehicleState, state2: VehicleState, metrics: Dict, frame_idx: int
+    ) -> Optional[Tuple[str, float, List[str]]]:
         """Apply multiple detection strategies"""
-        
+
         scores = {}
         factors = []
-        
+
         # Strategy 1: Sudden Stop with Overlap
-        if (metrics["speed_drop1"] > self.config.SPEED_DROP_THRESHOLD_MIN and
-            metrics["iou"] > self.config.IOU_THRESHOLD_MIN and
-            metrics["current_speed1"] < self.config.STOP_SPEED_THRESHOLD):
-            
-            score = min(1.0, (metrics["speed_drop1"] / self.config.SPEED_DROP_THRESHOLD_MAX) * 0.6 +
-                       (metrics["iou"] / self.config.IOU_THRESHOLD_COLLISION) * 0.4)
+        if (
+            metrics["speed_drop1"] > self.config.SPEED_DROP_THRESHOLD_MIN
+            and metrics["iou"] > self.config.IOU_THRESHOLD_MIN
+            and metrics["current_speed1"] < self.config.STOP_SPEED_THRESHOLD
+        ):
+
+            score = min(
+                1.0,
+                (metrics["speed_drop1"] / self.config.SPEED_DROP_THRESHOLD_MAX) * 0.6
+                + (metrics["iou"] / self.config.IOU_THRESHOLD_COLLISION) * 0.4,
+            )
             scores["sudden_stop"] = score
             factors.append(f"Sudden stop (V{state1.track_id})")
-        
+
         # Strategy 2: High IoU with Speed Drop
-        if (metrics["iou"] > self.config.IOU_THRESHOLD_COLLISION and
-            (metrics["speed_drop1"] > 2 or metrics["speed_drop2"] > 2)):
-            
-            score = min(1.0, (metrics["iou"] / 0.4) * 0.5 +
-                       (max(metrics["speed_drop1"], metrics["speed_drop2"]) / 10) * 0.5)
+        if metrics["iou"] > self.config.IOU_THRESHOLD_COLLISION and (
+            metrics["speed_drop1"] > 2 or metrics["speed_drop2"] > 2
+        ):
+
+            score = min(
+                1.0,
+                (metrics["iou"] / 0.4) * 0.5
+                + (max(metrics["speed_drop1"], metrics["speed_drop2"]) / 10) * 0.5,
+            )
             scores["collision_overlap"] = score
             factors.append("Physical collision detected")
-        
+
         # Strategy 3: Rapid IoU Increase
-        if (metrics["iou_growth"] > self.config.IOU_RAPID_INCREASE and
-            metrics["iou"] > self.config.IOU_THRESHOLD_MIN):
-            
-            score = min(1.0, (metrics["iou_growth"] / 0.1) * 0.6 +
-                       (metrics["iou"] / 0.3) * 0.4)
+        if (
+            metrics["iou_growth"] > self.config.IOU_RAPID_INCREASE
+            and metrics["iou"] > self.config.IOU_THRESHOLD_MIN
+        ):
+
+            score = min(
+                1.0, (metrics["iou_growth"] / 0.1) * 0.6 + (metrics["iou"] / 0.3) * 0.4
+            )
             scores["rapid_approach"] = score
             factors.append("Rapid approach detected")
-        
+
         # Strategy 4: Percentage Speed Drop
-        if (metrics["speed_drop_pct1"] > 50 and metrics["iou"] > 0.08):
-            score = min(1.0, (metrics["speed_drop_pct1"] / 100) * 0.7 +
-                       (metrics["iou"] / 0.2) * 0.3)
+        if metrics["speed_drop_pct1"] > 50 and metrics["iou"] > 0.08:
+            score = min(
+                1.0,
+                (metrics["speed_drop_pct1"] / 100) * 0.7 + (metrics["iou"] / 0.2) * 0.3,
+            )
             scores["percentage_drop"] = score
             factors.append(f"Major deceleration ({metrics['speed_drop_pct1']:.0f}%)")
-        
+
         # Strategy 5: Trajectory Change with Overlap
-        if (metrics["dir_change1"] > self.config.DIRECTION_CHANGE_THRESHOLD and
-            metrics["iou"] > 0.10 and
-            metrics["speed_drop1"] > 1):
-            
-            score = min(1.0, (metrics["dir_change1"] / 90) * 0.5 +
-                       (metrics["iou"] / 0.25) * 0.3 +
-                       (metrics["speed_drop1"] / 8) * 0.2)
+        if (
+            metrics["dir_change1"] > self.config.DIRECTION_CHANGE_THRESHOLD
+            and metrics["iou"] > 0.10
+            and metrics["speed_drop1"] > 1
+        ):
+
+            score = min(
+                1.0,
+                (metrics["dir_change1"] / 90) * 0.5
+                + (metrics["iou"] / 0.25) * 0.3
+                + (metrics["speed_drop1"] / 8) * 0.2,
+            )
             scores["trajectory_change"] = score
             factors.append("Trajectory change detected")
-        
+
         # Strategy 6: Both vehicles stopping
-        if (metrics["current_speed1"] < self.config.STOP_SPEED_THRESHOLD and
-            metrics["current_speed2"] < self.config.STOP_SPEED_THRESHOLD and
-            metrics["iou"] > self.config.IOU_THRESHOLD_COLLISION and
-            (metrics["avg_speed1"] > 5 or metrics["avg_speed2"] > 5)):
-            
-            score = min(1.0, (metrics["iou"] / 0.3) * 0.6 +
-                       ((metrics["avg_speed1"] + metrics["avg_speed2"]) / 20) * 0.4)
+        if (
+            metrics["current_speed1"] < self.config.STOP_SPEED_THRESHOLD
+            and metrics["current_speed2"] < self.config.STOP_SPEED_THRESHOLD
+            and metrics["iou"] > self.config.IOU_THRESHOLD_COLLISION
+            and (metrics["avg_speed1"] > 5 or metrics["avg_speed2"] > 5)
+        ):
+
+            score = min(
+                1.0,
+                (metrics["iou"] / 0.3) * 0.6
+                + ((metrics["avg_speed1"] + metrics["avg_speed2"]) / 20) * 0.4,
+            )
             scores["both_stopped"] = score
             factors.append("Both vehicles stopped")
-        
+
         if not scores:
             return None
-        
+
         # Combined confidence score
         max_strategy = max(scores.items(), key=lambda x: x[1])
         strategy_name = max_strategy[0]
         base_confidence = max_strategy[1]
-        
+
         # Bonus for multiple indicators
         if len(scores) > 1:
             base_confidence = min(1.0, base_confidence + 0.1 * (len(scores) - 1))
-        
+
         # High IoU bonus
         if metrics["iou"] > 0.25:
             base_confidence = min(1.0, base_confidence + 0.1)
-        
+
         return strategy_name, base_confidence, factors
 
-    def _create_accident_event(self, state1: VehicleState, state2: VehicleState,
-                               iou: float, metrics: Dict, frame_idx: int,
-                               strategy: str, confidence: float, factors: List[str]) -> AccidentEvent:
+    def _create_accident_event(
+        self,
+        state1: VehicleState,
+        state2: VehicleState,
+        iou: float,
+        metrics: Dict,
+        frame_idx: int,
+        strategy: str,
+        confidence: float,
+        factors: List[str],
+    ) -> AccidentEvent:
         """Create detailed accident event"""
-        
+
         # Calculate speeds in km/h
         speed1_kmh = self.speed_calc.pixel_speed_to_kmh(state1.speed)
         speed2_kmh = self.speed_calc.pixel_speed_to_kmh(state2.speed)
         drop1_kmh = self.speed_calc.pixel_speed_to_kmh(metrics["speed_drop1"])
         drop2_kmh = self.speed_calc.pixel_speed_to_kmh(metrics["speed_drop2"])
-        
+
         # Determine severity
         severity = self._calculate_severity(metrics, speed1_kmh, speed2_kmh)
-        
+
         # Primary vehicle (one with larger speed drop)
-        primary = state1.track_id if metrics["speed_drop1"] > metrics["speed_drop2"] else state2.track_id
-        
+        primary = (
+            state1.track_id
+            if metrics["speed_drop1"] > metrics["speed_drop2"]
+            else state2.track_id
+        )
+
         # Frame sequence
         frame_sequence = list(range(max(1, frame_idx - 5), frame_idx + 1))
-        
+
         return AccidentEvent(
             detection_time=self.metadata.frame_to_datetime(frame_idx),
             frame_number=frame_idx,
@@ -704,14 +846,16 @@ class MultiStrategyAccidentDetector:
             detection_strategy=strategy,
             confidence_score=confidence,
             contributing_factors=factors,
-            frame_sequence=frame_sequence
+            frame_sequence=frame_sequence,
         )
 
-    def _calculate_severity(self, metrics: Dict, speed1_kmh: float, speed2_kmh: float) -> str:
+    def _calculate_severity(
+        self, metrics: Dict, speed1_kmh: float, speed2_kmh: float
+    ) -> str:
         """Calculate collision severity"""
         avg_speed = (speed1_kmh + speed2_kmh) / 2
         max_drop = max(metrics["speed_drop_pct1"], metrics["speed_drop_pct2"])
-        
+
         if (metrics["iou"] > 0.3 and avg_speed > 30) or max_drop > 80:
             return "High"
         elif (metrics["iou"] > 0.2 and avg_speed > 15) or max_drop > 60:
@@ -732,25 +876,31 @@ class MultiStrategyAccidentDetector:
         # JSON
         try:
             with open(json_path, "w") as f:
-                json.dump({
-                    "video_info": {
-                        "filepath": self.metadata.filepath,
-                        "fps": self.metadata.fps,
-                        "duration": self.metadata.duration_seconds,
-                        "resolution": f"{self.metadata.width}x{self.metadata.height}"
+                json.dump(
+                    {
+                        "video_info": {
+                            "filepath": self.metadata.filepath,
+                            "fps": self.metadata.fps,
+                            "duration": self.metadata.duration_seconds,
+                            "resolution": f"{self.metadata.width}x{self.metadata.height}",
+                        },
+                        "detection_config": {
+                            "strategies": list(self.config.STRATEGY_WEIGHTS.keys()),
+                            "min_confidence": self.config.MIN_DETECTION_CONFIDENCE,
+                            "cooldown_seconds": self.config.COOLDOWN_SECONDS,
+                        },
+                        "summary": {
+                            "total_accidents": len(self.detected_accidents),
+                            "analysis_date": datetime.now().isoformat(),
+                        },
+                        "accidents": [acc.to_dict() for acc in self.detected_accidents],
                     },
-                    "detection_config": {
-                        "strategies": list(self.config.STRATEGY_WEIGHTS.keys()),
-                        "min_confidence": self.config.MIN_DETECTION_CONFIDENCE,
-                        "cooldown_seconds": self.config.COOLDOWN_SECONDS
-                    },
-                    "summary": {
-                        "total_accidents": len(self.detected_accidents),
-                        "analysis_date": datetime.now().isoformat()
-                    },
-                    "accidents": [acc.to_dict() for acc in self.detected_accidents]
-                }, f, indent=2)
-            self.logger.info(f"Saved {len(self.detected_accidents)} accidents to {json_path}")
+                    f,
+                    indent=2,
+                )
+            self.logger.info(
+                f"Saved {len(self.detected_accidents)} accidents to {json_path}"
+            )
         except Exception as e:
             self.logger.error(f"Failed to save JSON: {e}")
 
@@ -788,7 +938,7 @@ class AccidentDetectionSystem:
         self.config = config
         self.logger = setup_logging(config.LOG_FILE)
         self.video_metadata: Optional[VideoMetadata] = None
-        
+
         self.logger.info(f"Loading YOLO model: {config.MODEL_PATH}")
         self.model = YOLO(config.MODEL_PATH)
 
@@ -809,7 +959,9 @@ class AccidentDetectionSystem:
         )
 
         # Initialize components
-        speed_calc = AdvancedSpeedCalculator(self.video_metadata, self.config.PIXEL_TO_METER)
+        speed_calc = AdvancedSpeedCalculator(
+            self.video_metadata, self.config.PIXEL_TO_METER
+        )
         detector = MultiStrategyAccidentDetector(
             self.config, self.logger, self.video_metadata, speed_calc
         )
@@ -821,7 +973,7 @@ class AccidentDetectionSystem:
             persist=True,
             stream=True,
             conf=self.config.CONFIDENCE_THRESHOLD,
-            verbose=False
+            verbose=False,
         )
 
         frame_idx = 0
@@ -856,9 +1008,9 @@ class AccidentDetectionSystem:
                 # Analyze all pairs
                 for v1, v2 in itertools.combinations(vehicles, 2):
                     iou = AdvancedCollisionDetector.calculate_iou(v1.bbox, v2.bbox)
-                    
+
                     event = detector.analyze_pair(v1, v2, iou, frame_idx)
-                    
+
                     if event:
                         detector.log_accident(event)
                         print(event.to_readable_string())
@@ -874,15 +1026,27 @@ class AccidentDetectionSystem:
             raise
         finally:
             actual_duration = actual_frames / self.video_metadata.fps
-            
+
             detector.save_results(self.config.ACCIDENT_LOG, self.config.ACCIDENT_REPORT)
-            
+
+            clip_paths = generate_accident_clips(
+                video_path=self.video_metadata.filepath,
+                accidents=detector.detected_accidents,
+                clip_duration_pre=1.0,
+                clip_duration_post=5.0,
+            )
+
+            for acc, path in zip(detector.detected_accidents, clip_paths):
+                acc.clip_path = path
+
+            detector.save_results(self.config.ACCIDENT_LOG, self.config.ACCIDENT_REPORT)
+
             self.logger.info(
                 f"\n{'='*80}\n"
                 f"PROCESSING COMPLETE\n"
                 f"{'='*80}\n"
                 f"Frames Processed: {actual_frames}\n"
-                f"Video Duration: {actual_duration:.2f}s ({int(actual_duration//60)}:{int(actual_duration%60):02d})\n"
+                f"Video Duration: {actual_duration:.2f}s\n"
                 f"FPS: {self.video_metadata.fps:.2f}\n"
                 f"Accidents Detected: {len(detector.detected_accidents)}\n"
                 f"Output Files:\n"
@@ -920,7 +1084,7 @@ def main():
         CONFIDENCE_THRESHOLD=0.45,
         COOLDOWN_SECONDS=8.0,
         MIN_DETECTION_CONFIDENCE=0.60,
-        MAX_ACCIDENTS_PER_PAIR=1
+        MAX_ACCIDENTS_PER_PAIR=1,
     )
 
     system = AccidentDetectionSystem(config)
