@@ -20,3 +20,7 @@ venv/
 
 venv
 public
+accidents_clips
+accident_report.txt
+accidents.json
+accident_report.txt
